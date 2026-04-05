@@ -1,0 +1,11 @@
+[configuration]
+entry_symbol = "quantads_library_init"
+compatibility_minimum = "4.3"
+
+[libraries]
+linux.debug.x86_64 = "res://bin/libquantads_native_processor.linux.debug.x86_64.so"
+linux.release.x86_64 = "res://bin/libquantads_native_processor.linux.release.x86_64.so"
+windows.debug.x86_64 = "res://bin/quantads_native_processor.windows.debug.x86_64.dll"
+windows.release.x86_64 = "res://bin/quantads_native_processor.windows.release.x86_64.dll"
+macos.debug = "res://bin/libquantads_native_processor.macos.debug.framework"
+macos.release = "res://bin/libquantads_native_processor.macos.release.framework"

@@ -4,6 +4,7 @@
 extends Node
 
 @onready var socket_client: Node = get_node("/root/SocketIOClient")
+@onready var quantads_native_bridge = preload("res://scripts/quantads_native_bridge.gd").new()
 @export var npc_scene: PackedScene = preload("res://scenes/npc.tscn")
 @export var remote_player_scene: PackedScene = preload("res://scenes/player.tscn")
 @export var vehicle_scene: PackedScene = preload("res://scenes/vehicle.tscn")
@@ -13,11 +14,14 @@ extends Node
 @export var data_terminal_scene: PackedScene = preload("res://scenes/data_terminal.tscn")
 @export var projectile_tracer_scene: PackedScene = preload("res://scenes/projectile_tracer.tscn")
 @export var elevator_scene: PackedScene = preload("res://scenes/elevator_system.tscn")
+@export var spatial_anchor_ad_scene: PackedScene = preload("res://scenes/spatial_anchor_ad.tscn")
 
 @export var announcement_scene: PackedScene = preload("res://scenes/announcement_banner.tscn")
 
 # ── Tracking ─────────────────────────────────────────
 var entities: Dictionary = {} # {id: Node3D}
+var quantad_anchors: Dictionary = {} # {ad_id: Node3D}
+var quantad_fallback_counter: int = 0
 var local_player: CharacterBody3D
 
 signal world_entered(data)
@@ -40,6 +44,7 @@ func _ready():
 	socket_client.on_event("zipline_ride", _handle_zipline_ride)
 	socket_client.on_event("player_subway", _handle_player_subway)
 	socket_client.on_event("global_announcement", _handle_global_announcement)
+	socket_client.on_event("quantads_auction_won", _handle_quantads_auction_won)
 	
 	print("[Network] Ready to sync world.")
 	local_player = get_tree().root.find_child("Player", true, false)
@@ -50,7 +55,9 @@ func _ready():
 
 	# WebGL Export React Bridge (Strict Payload Validation)
 	if has_node("/root/ReactBridge"):
-		get_node("/root/ReactBridge").auth_token_received.connect(_on_react_auth_token_strict)
+		var react_bridge = get_node("/root/ReactBridge")
+		react_bridge.auth_token_received.connect(_on_react_auth_token_strict)
+		react_bridge.quantads_auction_won_received.connect(_handle_quantads_auction_won)
 
 func _on_react_auth_token_strict(token: String):
 	print("[NetworkManager] Passing strict Auth Token to SocketIO Client")
@@ -337,3 +344,24 @@ func _handle_global_announcement(data: Dictionary):
 		var banner = banners[0]
 		if banner.has_method("show_announcement"):
 			banner.show_announcement(data.message, data.get("duration", 4.0))
+
+func _handle_quantads_auction_won(data: Dictionary):
+	var cpc = float(data.get("cpc", 0.0))
+	if not quantads_native_bridge.is_high_value_auction(cpc):
+		return
+	
+	var ad_id = str(data.get("id", ""))
+	if ad_id == "":
+		quantad_fallback_counter += 1
+		ad_id = "auction_%s_%d" % [str(Time.get_ticks_usec()), quantad_fallback_counter]
+	
+	var anchor = quantad_anchors.get(ad_id, null)
+	if anchor == null:
+		anchor = spatial_anchor_ad_scene.instantiate()
+		quantad_anchors[ad_id] = anchor
+		get_tree().root.add_child(anchor)
+	
+	# Existing anchors are refreshed in place so repeated wins for the same ad id
+	# continue to feel like one persistent in-world spatial object.
+	if anchor.has_method("configure_from_payload"):
+		anchor.configure_from_payload(data)

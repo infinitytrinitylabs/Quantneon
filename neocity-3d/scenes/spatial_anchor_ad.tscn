@@ -1,0 +1,23 @@
+[gd_scene load_steps=4 format=3 uid="uid://b2vylfocq725w"]
+
+[ext_resource type="Script" path="res://scripts/spatial_anchor_ad.gd" id="1_script"]
+[ext_resource type="Material" uid="uid://cax2e0p7j1w0g" path="res://materials/hologram.tres" id="2_hologram_mat"]
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_anchor"]
+top_radius = 0.45
+bottom_radius = 0.45
+height = 1.2
+
+[node name="SpatialAnchorAd" type="Node3D"]
+script = ExtResource("1_script")
+
+[node name="AnchorMesh" type="MeshInstance3D" parent="."]
+cast_shadow = 0
+mesh = SubResource("CylinderMesh_anchor")
+surface_material_override/0 = ExtResource("2_hologram_mat")
+
+[node name="AnchorLabel" type="Label3D" parent="."]
+transform = Transform3D(0.8, 0, 0, 0, 0.8, 0, 0, 0, 0.8, 0, 1.2, 0)
+modulate = Color(0, 1, 1, 0.9)
+billboard = 1
+text = "Sponsored\n$0.00 CPC"

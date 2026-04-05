@@ -4,6 +4,7 @@
 extends Node
 
 signal auth_token_received(token: String)
+signal quantads_auction_won_received(payload: Dictionary)
 signal bridge_ready()
 
 var _js_message_cb = null
@@ -62,6 +63,9 @@ func _on_js_message(args):
 			if msg_data.has("token"):
 				print("[ReactBridge] Received AUTH_INJECT")
 				emit_signal("auth_token_received", msg_data["token"])
+		"QUANTADS_AUCTION_WON":
+			if msg_data is Dictionary:
+				emit_signal("quantads_auction_won_received", msg_data)
 		_:
 			print("[ReactBridge] Unhandled message type: ", msg_type)
 
