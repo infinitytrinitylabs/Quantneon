@@ -1,0 +1,164 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Users ────────────────────────────────────────────────────────────────────
+
+model User {
+  id          String   @id @default(uuid())
+  quantmailId String   @unique // External Quantmail user ID (Biometric SSO)
+  username    String   @unique
+  displayName String
+  bio         String?
+  avatarUrl   String?
+  mood        String?  // Current mood from Quant ecosystem
+  isBanned    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  avatar       UserAvatar?
+  posts        NeonPost[]
+  streams      LiveStream[]
+  virtualItems UserVirtualItem[]
+
+  @@map("users")
+}
+
+// ─── UserAvatars ──────────────────────────────────────────────────────────────
+
+model UserAvatar {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  skinTone    String   @default("default")
+  hairStyle   String   @default("default")
+  outfit      String   @default("default")
+  accessories String[] @default([])
+  glbUrl      String?  // S3 URL to 3D .glb model
+  previewUrl  String?  // S3 URL to avatar preview image
+  xpLevel     Int      @default(1)
+  reputation  Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("user_avatars")
+}
+
+// ─── NeonPosts ────────────────────────────────────────────────────────────────
+
+model NeonPost {
+  id          String        @id @default(uuid())
+  authorId    String
+  author      User          @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  caption     String?
+  mediaUrl    String?       // S3 URL for image/video
+  mediaType   MediaType     @default(IMAGE)
+  mood        String?       // Author mood when posted
+  tags        String[]      @default([])
+  likeCount   Int           @default(0)
+  viewCount   Int           @default(0)
+  isAR        Boolean       @default(false) // AR-enabled post
+  arAnchorUrl String?       // AR anchor data URL
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@map("neon_posts")
+}
+
+enum MediaType {
+  IMAGE
+  VIDEO
+  AR_SCENE
+  HOLOGRAM
+}
+
+// ─── LiveStreams ───────────────────────────────────────────────────────────────
+
+model LiveStream {
+  id           String       @id @default(uuid())
+  hostId       String
+  host         User         @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  title        String
+  description  String?
+  thumbnailUrl String?
+  streamKey    String       @unique @default(uuid())
+  rtmpUrl      String?
+  hlsUrl       String?
+  status       StreamStatus @default(SCHEDULED)
+  viewerCount  Int          @default(0)
+  maxViewers   Int          @default(0)
+  isInteractive Boolean     @default(true)  // Allows viewer avatar interaction
+  virtualRoomId String?     // Links to a VirtualLobby
+  startedAt    DateTime?
+  endedAt      DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  @@map("live_streams")
+}
+
+enum StreamStatus {
+  SCHEDULED
+  LIVE
+  ENDED
+}
+
+// ─── VirtualItems ─────────────────────────────────────────────────────────────
+
+model VirtualItem {
+  id          String    @id @default(uuid())
+  name        String
+  description String?
+  itemType    ItemType
+  rarity      ItemRarity @default(COMMON)
+  previewUrl  String?   // Image preview
+  glbUrl      String?   // 3D model URL
+  price       Float     @default(0)
+  currency    String    @default("NEON_COIN")
+  isLimited   Boolean   @default(false)
+  totalSupply Int?
+  createdAt   DateTime  @default(now())
+
+  owners UserVirtualItem[]
+
+  @@map("virtual_items")
+}
+
+enum ItemType {
+  AVATAR_SKIN
+  OUTFIT
+  ACCESSORY
+  EMOTE
+  BACKGROUND
+  AR_EFFECT
+  VIRTUAL_GIFT
+}
+
+enum ItemRarity {
+  COMMON
+  RARE
+  EPIC
+  LEGENDARY
+}
+
+model UserVirtualItem {
+  id         String      @id @default(uuid())
+  userId     String
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  itemId     String
+  item       VirtualItem @relation(fields: [itemId], references: [id])
+  acquiredAt DateTime    @default(now())
+  isEquipped Boolean     @default(false)
+
+  @@unique([userId, itemId])
+  @@map("user_virtual_items")
+}

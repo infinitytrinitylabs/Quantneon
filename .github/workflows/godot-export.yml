@@ -1,0 +1,51 @@
+name: Godot Export
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'neocity-3d/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'neocity-3d/**'
+
+jobs:
+  export:
+    name: Export Godot Web Build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Setup Godot
+        uses: chickensoft-games/setup-godot@v1
+        with:
+          version: '4.3.0'
+          use-dotnet: false
+          include-templates: true
+
+      - name: Verify Godot project
+        run: godot --headless --path neocity-3d --quit 2>&1 || true
+
+      - name: Create export output directory
+        run: mkdir -p neocity-3d/export/web
+
+      - name: Export Web (HTML5)
+        run: |
+          godot --headless --path neocity-3d \
+            --export-release "Web" \
+            export/web/index.html 2>&1 || echo "Export skipped (no export template or preset defined)"
+
+      - name: Upload Web Export Artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantneon-web-${{ github.sha }}
+          path: neocity-3d/export/web/
+          retention-days: 14

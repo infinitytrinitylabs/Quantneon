@@ -1,0 +1,11 @@
+{
+  "name": "quantneon",
+  "version": "1.0.0",
+  "description": "Quantneon — The Gamified Social Platform (Instagram / WePlay Killer)",
+  "scripts": {
+    "test": "node --test tests/**/*.test.js"
+  },
+  "workspaces": [
+    "quantneon-backend/quantneon-backend"
+  ]
+}
