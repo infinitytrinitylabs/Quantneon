@@ -46,6 +46,9 @@ var hp_sprite: Sprite3D
 var damage_text_scene = preload("res://scenes/damage_text.tscn")
 var drone_scene = preload("res://scenes/drone_companion.tscn")
 var active_drone: Node3D = null
+# Reused tween for remote-player position interpolation; killed before each reuse to
+# prevent conflicting animations from accumulating when updates arrive rapidly.
+var _remote_move_tween: Tween = null
 
 func _ready() -> void:
 	if !is_remote:
@@ -214,9 +217,13 @@ func update_state(data: Dictionary):
 	if is_remote and data.has("x"):
 		target_pos = Vector3(data.x / 10.0, 1.0, data.y / 10.0)
 		target_rot = data.r if data.has("r") else 0.0
-		# NetworkManager already handles position interpolation but we can refine here
-		global_position = target_pos
-		rotation.y = target_rot
+		# Kill any in-flight tween before starting a new one to avoid conflicting
+		# animations accumulating when network updates arrive rapidly.
+		if _remote_move_tween and _remote_move_tween.is_running():
+			_remote_move_tween.kill()
+		_remote_move_tween = create_tween().set_parallel(true)
+		_remote_move_tween.tween_property(self, "global_position", target_pos, 0.1)
+		_remote_move_tween.tween_property(self, "rotation:y", target_rot, 0.1)
 
 
 func die():

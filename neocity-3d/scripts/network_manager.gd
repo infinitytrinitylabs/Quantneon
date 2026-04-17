@@ -209,12 +209,8 @@ func _update_or_create_entity(data: Dictionary, scene: PackedScene, type: String
 		if data.has("r"):
 			entity.rotation.y = lerp_angle(entity.rotation.y, data.r, 0.2)
 	
-	# Handle Faction/Capture Point/Vault/Player specific state
-	if type == "player" and entity.has_method("update_state"):
-		entity.update_state(data)
-	
-	if type == "npc" and entity.has_method("update_state"):
-		entity.update_state(data)
+	# Handle Faction/Capture Point/Vault/Player specific state — call once via the
+	# generic check to avoid double-applying state for player and npc entities.
 	if entity.has_method("update_state"):
 		entity.update_state(data)
 	
