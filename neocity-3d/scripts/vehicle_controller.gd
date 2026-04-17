@@ -10,11 +10,14 @@ extends VehicleBody3D
 
 var driver: Node3D = null
 var is_remote: bool = false
-var target_pos: Vector3
-var target_rot: float
+var target_pos: Vector3 = Vector3.ZERO
+var target_rot: float = 0.0
 
 var current_health: float = 100.0
+# Skip crash detection on the very first frame — last_velocity starts at Vector3.ZERO and
+# a vehicle already at speed would see a huge Δv and take false damage.
 var last_velocity: Vector3 = Vector3.ZERO
+var _velocity_initialised: bool = false
 
 @export var is_police: bool = false
 var sirens_on: bool = false
@@ -25,27 +28,32 @@ func set_remote_mode(value: bool):
 	freeze = value
 
 func _physics_process(delta):
-	# Crash detection
-	var speed_diff = (last_velocity - linear_velocity).length()
-	if driver and not is_remote and speed_diff > 15.0:
-		var damage = speed_diff * 0.5
-		current_health = max(0.0, current_health - damage)
-		print("[Vehicle] CRASH! Damage: ", damage, " Health: ", current_health)
-		
-		# If mission active, report damage to backend to reduce payout (to be wired if backend supports it later)
-		# For now, visually simulate penalty
-		var mission_hud = get_node_or_null("/root/VehicleMissionHUD")
-		if mission_hud and mission_hud.is_active:
-			# Pass the tracked start_time or whatever the internal timer is, rather than parsing a label
-			mission_hud._update_display(mission_hud.start_time, current_health)
-			
+	# Crash detection — skip the very first frame to avoid false positives caused
+	# by last_velocity being Vector3.ZERO while the vehicle already has speed.
+	if _velocity_initialised:
+		var speed_diff = (last_velocity - linear_velocity).length()
+		if driver and not is_remote and speed_diff > 15.0:
+			var damage = speed_diff * 0.5
+			current_health = max(0.0, current_health - damage)
+			print("[Vehicle] CRASH! Damage: ", damage, " Health: ", current_health)
+
+			# If mission active, report damage to backend to reduce payout (to be wired if backend supports it later)
+			# For now, visually simulate penalty
+			var mission_hud = get_node_or_null("/root/VehicleMissionHUD")
+			if mission_hud and mission_hud.is_active:
+				# Pass the tracked start_time or whatever the internal timer is, rather than parsing a label
+				mission_hud._update_display(mission_hud.start_time, current_health)
+
 	last_velocity = linear_velocity
+	_velocity_initialised = true
 
 	if is_remote:
 		# Ensure we stay frozen if remote
 		if not freeze: freeze = true
-		global_position = global_position.lerp(target_pos, 0.1)
-		rotation.y = lerp_angle(rotation.y, target_rot, 0.1)
+		# Use delta-based weight so interpolation speed is frame-rate independent.
+		var lerp_weight = 1.0 - pow(0.1, delta * 10.0)
+		global_position = global_position.lerp(target_pos, lerp_weight)
+		rotation.y = lerp_angle(rotation.y, target_rot, lerp_weight)
 		_process_sirens(delta)
 		return
 
@@ -65,14 +73,15 @@ func _physics_process(delta):
 		if Input.is_action_just_pressed("interact"):
 			_exit_vehicle()
 			
-		# Sync to Network at 10Hz
+		# Sync to Network at 10Hz — flat x/y/r fields match network_manager expectations.
 		if Engine.get_physics_frames() % 6 == 0:
 			var nm = get_node_or_null("/root/NetworkManager")
-			if nm:
+			if nm and nm.socket_client:
 				nm.socket_client.send_event("vehicle_move", {
 					"vehicleId": vehicle_id,
-					"pos": {"x": global_position.x * 10, "y": global_position.z * 10},
-					"rot": rotation.y
+					"x": global_position.x * 10,
+					"y": global_position.z * 10,
+					"r": rotation.y
 				})
 	else:
 		# Parked
@@ -86,7 +95,9 @@ func _process_sirens(delta):
 		
 	siren_timer += delta * 10.0
 	var flash = int(siren_timer) % 2
-	var mesh = $MeshInstance3D
+	var mesh = get_node_or_null("MeshInstance3D")
+	if mesh == null:
+		return
 	if flash == 0:
 		mesh.modulate = Color(1, 0, 0) # Red
 	else:
@@ -101,7 +112,7 @@ func _enter_vehicle(player):
 	driver = player
 	
 	var nm = get_node_or_null("/root/NetworkManager")
-	if nm:
+	if nm and nm.socket_client:
 		nm.socket_client.send_event("vehicle_enter", {"vehicleId": vehicle_id})
 	
 	# Reparent player to vehicle or disable player physics
@@ -119,9 +130,14 @@ func _exit_vehicle():
 	print("[Vehicle] Player exited")
 	var player = driver
 	driver = null
+
+	# Stop the car from driving itself after the player leaves.
+	engine_force = 0.0
+	steering = 0.0
+	brake = brake_force
 	
 	var nm = get_node_or_null("/root/NetworkManager")
-	if nm:
+	if nm and nm.socket_client:
 		nm.socket_client.send_event("vehicle_exit", {"vehicleId": vehicle_id})
 	
 	remove_child(player)
