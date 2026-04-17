@@ -1,0 +1,160 @@
+[gd_scene load_steps=2 format=3 uid="uid://landownership_ui"]
+
+[ext_resource type="Script" path="res://scripts/land_ownership_ui.gd" id="1_los_ui"]
+
+[node name="LandOwnershipUI" type="CanvasLayer"]
+script = ExtResource("1_los_ui")
+
+[node name="BgDim" type="ColorRect" parent="."]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0, 0, 0, 0.55)
+mouse_filter = 0
+
+[node name="MainPanel" type="Panel" parent="."]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -380.0
+offset_top = -280.0
+offset_right = 380.0
+offset_bottom = 280.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Header" type="HBoxContainer" parent="MainPanel"]
+layout_mode = 1
+anchors_preset = 5
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -360.0
+offset_top = 8.0
+offset_right = 360.0
+offset_bottom = 38.0
+grow_horizontal = 2
+
+[node name="TitleLabel" type="Label" parent="MainPanel/Header"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0, 1, 1, 1)
+theme_override_font_sizes/font_size = 20
+text = "🏙  LAND OWNERSHIP"
+
+[node name="BalanceLabel" type="Label" parent="MainPanel/Header"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.85, 0, 1)
+theme_override_font_sizes/font_size = 14
+text = "Balance: — QT"
+horizontal_alignment = 2
+
+[node name="CloseButton" type="Button" parent="MainPanel/Header"]
+layout_mode = 2
+custom_minimum_size = Vector2(32, 28)
+text = "X"
+
+[node name="TabBar" type="HBoxContainer" parent="MainPanel"]
+layout_mode = 1
+anchors_preset = 5
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -360.0
+offset_top = 44.0
+offset_right = 360.0
+offset_bottom = 72.0
+grow_horizontal = 2
+theme_override_constants/separation = 4
+
+[node name="TabBlocks" type="Button" parent="MainPanel/TabBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "All Blocks"
+
+[node name="TabOwned" type="Button" parent="MainPanel/TabBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "My Blocks"
+
+[node name="TabEvents" type="Button" parent="MainPanel/TabBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Event Zones 🌟"
+
+[node name="ContentArea" type="ScrollContainer" parent="MainPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 10.0
+offset_top = 78.0
+offset_right = -10.0
+offset_bottom = -12.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="BlockList" type="VBoxContainer" parent="MainPanel/ContentArea"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 6
+
+[node name="DramaToast" type="PanelContainer" parent="."]
+anchors_preset = 7
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -300.0
+offset_top = -90.0
+offset_right = 300.0
+offset_bottom = -20.0
+grow_horizontal = 2
+grow_vertical = 0
+visible = false
+
+[node name="Label" type="Label" parent="DramaToast"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.55, 0, 1)
+theme_override_font_sizes/font_size = 14
+text = "Drama placeholder"
+horizontal_alignment = 1
+autowrap_mode = 2
+
+[node name="EventBanner" type="PanelContainer" parent="."]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -310.0
+offset_top = 60.0
+offset_right = -10.0
+offset_bottom = 160.0
+grow_horizontal = 0
+visible = false
+
+[node name="VBox" type="VBoxContainer" parent="EventBanner"]
+layout_mode = 2
+theme_override_constants/separation = 3
+
+[node name="EventTitle" type="Label" parent="EventBanner/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.6, 0, 1)
+theme_override_font_sizes/font_size = 16
+text = "🌟 Event Zone Active"
+horizontal_alignment = 1
+
+[node name="EventTimer" type="Label" parent="EventBanner/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.85, 0, 1)
+theme_override_font_sizes/font_size = 13
+text = "⏱ 48h 00m"
+horizontal_alignment = 1
+
+[node name="EventReward" type="Label" parent="EventBanner/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.5, 1, 0.5, 1)
+theme_override_font_sizes/font_size = 12
+text = "Reward: 0 QT"
+horizontal_alignment = 1

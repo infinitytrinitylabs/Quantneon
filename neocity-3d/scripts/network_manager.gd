@@ -78,7 +78,8 @@ func _ready():
 	socket_client.on_event("player_subway", _handle_player_subway)
 	socket_client.on_event("global_announcement", _handle_global_announcement)
 	socket_client.on_event("quantads_auction_won", _handle_quantads_auction_won)
-	
+	socket_client.on_event("land_block_decay_update", _handle_land_block_decay_update)
+
 	print("[Network] Ready to sync world.")
 	local_player = get_tree().root.find_child("Player", true, false)
 	
@@ -483,3 +484,17 @@ func _handle_quantads_auction_won(data: Dictionary):
 	# continue to feel like one persistent in-world spatial object.
 	if anchor.has_method("configure_from_payload"):
 		anchor.configure_from_payload(data)
+
+func _handle_land_block_decay_update(data: Dictionary):
+	# Forward server-authoritative decay updates to BuildingDecaySystem.
+	if has_node("/root/BuildingDecaySystem"):
+		var bds: Node = get_node("/root/BuildingDecaySystem")
+		var bid: String = data.get("blockId", data.get("block_id", ""))
+		var stage: int  = int(data.get("decayStage", data.get("decay_stage", 0)))
+		if bid != "" and bds.has_method("get_decay_stage"):
+			# Notify LandOwnershipService so it can update its block registry.
+			if has_node("/root/LandOwnershipService"):
+				var los: Node = get_node("/root/LandOwnershipService")
+				if los.blocks.has(bid):
+					los.blocks[bid]["decay_stage"] = stage
+					los.emit_signal("blocks_updated", [bid])

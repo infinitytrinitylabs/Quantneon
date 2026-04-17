@@ -1,507 +1,366 @@
-## BuildingDecaySystem.gd
-## ---------------------------------------------------------------------------
-## Ghost-building decay engine — the "social shame" half of issue #12.
+## BuildingDecaySystem — Ghost Building Decay for Inactive Landowners
 ##
-## Rules
-##   • Every owned block has a `last_visit` timestamp.  If the owner has not
-##     physically entered the block (or applied any customization) for more
-##     than `decay_grace_days`, the building begins to decay.
-##   • Decay advances through 5 discrete stages:
-##         0 pristine  → 1 faded → 2 grimy → 3 overgrown → 4 ghost
-##     Each stage applies a visual modifier (colour tint, graffiti overlay,
-##     broken-window mesh swap) that the renderer listens for.
-##   • Decayed buildings broadcast a city-wide "ghost sighting" — other
-##     players see a notification ("Block (3,-2) in Wastelands has been
-##     abandoned for 9 days by @nyxstrider 👻").  That is the shame vector.
-##   • Rent on decayed buildings is reduced by `RentEconomy` which queries
-##     the current decay level via `BuildingDecaySystem.decay_level_for`.
-##   • Full restoration requires the owner to visit AND apply a customization
-##     within the same day.  Stage 4 (ghost) can also be "reclaimed" by
-##     another player for a heavy fee if the original owner doesn't return
-##     within `ghost_claim_unlock_days`.
-##   • Leaderboard penalty: every completed decay stage subtracts points.
+## Handles:
+##   • Monitoring all owned and nearby blocks for inactivity.
+##   • 5-stage visual decay applied to building meshes in the 3D world:
+##       Stage 0 — pristine (normal neon glow)
+##       Stage 1 — slight flicker (48 h since last visit)
+##       Stage 2 — dim glow + crack overlay (4 days)
+##       Stage 3 — ghost / semi-transparent + static noise (7 days — full ghost)
+##       Stage 4 — ruins mesh + no glow (14 days — maximum shame)
+##   • Social shame broadcast — when a block reaches stage 3 nearby players
+##     receive a zone notification so they can see the abandoned building.
+##   • Restoration — visiting the block (or triggering restore_block()) resets
+##     the decay stage immediately and notifies the server.
+##   • Gold-glow enforcement — when LandOwnershipService reports a gold-glow
+##     streak milestone, this system applies the particle effect to the mesh.
 ##
-## Autoload name: `BuildingDecaySystem`.
-## ---------------------------------------------------------------------------
+## The system works purely on client-side visual changes based on server data
+## pushed via LandOwnershipService signals. No direct socket calls are made
+## here; the service layer handles all persistence.
+##
+## Dependencies (autoloads):
+##   LandOwnershipService, SocketIOClient
+
 extends Node
 
-# ── Tunables ────────────────────────────────────────────────────────────────
+# ── Constants ──────────────────────────────────────────────────────────────────
 
-## Real-time days of inactivity before decay begins.
-@export var decay_grace_days: int = 7
+## Seconds between local decay checks (lightweight; server is authoritative).
+const LOCAL_CHECK_INTERVAL: float = 30.0
 
-## Days *between* subsequent stages once decay has started.
-@export var decay_step_days: int = 2
+## Days of inactivity per decay stage transition.
+const STAGE_THRESHOLDS_DAYS: Array = [0, 2, 4, 7, 14]
 
-## After how many days at stage 4 can anyone claim the block?
-@export var ghost_claim_unlock_days: int = 14
+## Alpha (transparency) applied to building material per stage.
+const STAGE_ALPHA: Array = [1.0, 0.95, 0.8, 0.45, 0.2]
 
-## Point penalty applied to the city leaderboard per decay stage.
-@export var leaderboard_penalty_per_stage: int = 20
+## Emission energy multiplier per stage (1.0 = full neon glow, 0 = no glow).
+const STAGE_EMISSION: Array = [1.0, 0.7, 0.4, 0.1, 0.0]
 
-## Claim-steal fee multiplier — stealing a ghost block costs price × this.
-@export var ghost_steal_price_mult: float = 1.75
-
-## Interval at which the system scans all blocks for decay transitions.
-@export var scan_interval_sec: float = 30.0
-
-## Descriptive label for each stage (0..4).
-const STAGE_LABELS: Array[String] = [
-	"pristine",
-	"faded",
-	"grimy",
-	"overgrown",
-	"ghost",
+## Color tint applied per stage (additive mix toward grey/ghost).
+const STAGE_COLOR_TINT: Array = [
+	Color(1.0, 1.0, 1.0, 1.0),   # Stage 0 — pristine
+	Color(0.9, 0.9, 1.0, 0.95),  # Stage 1 — cool blue hint
+	Color(0.7, 0.7, 0.8, 0.80),  # Stage 2 — desaturated
+	Color(0.5, 0.5, 0.6, 0.45),  # Stage 3 — ghost translucent
+	Color(0.3, 0.3, 0.3, 0.20),  # Stage 4 — ruin silhouette
 ]
 
-## Visual tint broadcast to renderers for each stage (HSV-value).
-const STAGE_TINTS: Array[Color] = [
-	Color(1.00, 1.00, 1.00, 1.0),
-	Color(0.85, 0.85, 0.80, 1.0),
-	Color(0.65, 0.62, 0.55, 1.0),
-	Color(0.42, 0.45, 0.35, 1.0),
-	Color(0.22, 0.24, 0.26, 1.0),
-]
+## Gold glow emission color applied when decoration streak ≥ GOLD_GLOW_STREAK.
+const GOLD_GLOW_COLOR: Color = Color(1.0, 0.85, 0.0, 1.0)
+const GOLD_GLOW_ENERGY: float = 3.0
 
-## Overlay texture hints per stage — a renderer may swap in these graffiti
-## decals.  Paths are advisory; absent textures are simply ignored.
-const STAGE_OVERLAY_HINTS: Array[String] = [
-	"",
-	"res://materials/decay/dust.png",
-	"res://materials/decay/grime.png",
-	"res://materials/decay/vines.png",
-	"res://materials/decay/ghost.png",
-]
+## Social shame notification cooldown per block (seconds) to avoid spam.
+const SHAME_NOTIFICATION_COOLDOWN: float = 300.0
 
-# ── State ───────────────────────────────────────────────────────────────────
+# ── State ──────────────────────────────────────────────────────────────────────
 
-## {block_key: Dictionary} — decay record per owned block.
-##   {
-##     "block_key": String,
-##     "owner_id": String,
-##     "stage": int,                  # 0..4
-##     "last_visit": int,             # unix s
-##     "stage_since": int,             # unix s — when we entered current stage
-##     "ghost_since": int,             # unix s — only valid at stage 4
-##     "notified": Dictionary,         # set of stages already broadcast
-##     "restore_progress": float,      # 0..1 for smooth UI bar
-##   }
-var decay_state: Dictionary = {}
+## Maps block_id → Node3D building mesh node (populated by register_building).
+var building_nodes: Dictionary = {}
 
-## List of the most recent ghost sightings broadcast city-wide (ring buffer).
-var ghost_feed: Array = []
-const GHOST_FEED_MAX: int = 40
+## Maps block_id → current applied decay stage (0-4).
+var applied_stages: Dictionary = {}
 
-## Tick accumulator.
-var _scan_accum: float = 0.0
+## Maps block_id → unix timestamp of last shame broadcast.
+var shame_broadcast_times: Dictionary = {}
 
-## Cached reference to LandOwnershipService (resolved lazily).
-var _los_ref: Node = null
+## Timer accumulator.
+var _check_timer: float = 0.0
 
-## Set to true after the first scan so emitters don't spam on world load.
-var _did_initial_scan: bool = false
+# ── Signals ───────────────────────────────────────────────────────────────────
 
-# ── Signals ─────────────────────────────────────────────────────────────────
+## Emitted when a building's visual decay stage changes.
+signal decay_stage_changed(block_id: String, old_stage: int, new_stage: int)
 
-signal decay_stage_changed(block_key, new_stage, old_stage)
-signal decay_visual_update(block_key, stage, tint, overlay_path)
-signal ghost_sighting_broadcast(block_key, owner_id, owner_name, days_absent)
-signal restoration_started(block_key, owner_id)
-signal restoration_completed(block_key, owner_id, stages_recovered)
-signal ghost_reclaimed(block_key, old_owner_id, new_owner_id, fee_paid)
-signal shame_toast(message)
-signal decay_snapshot_ready(snapshot)
+## Emitted when a building is visually restored to stage 0.
+signal building_restored(block_id: String)
 
-# ── Lifecycle ───────────────────────────────────────────────────────────────
+## Emitted when gold-glow is applied to a building.
+signal gold_glow_applied(block_id: String)
+
+## Emitted when social-shame notification fires for an abandoned building.
+signal shame_notification_sent(block_id: String, stage: int, owner_name: String)
+
+# ── Lifecycle ──────────────────────────────────────────────────────────────────
 
 func _ready() -> void:
-	var los := _los()
-	if los:
-		los.connect("block_registry_updated", Callable(self, "_on_registry_updated"))
-		los.connect("ownership_changed", Callable(self, "_on_ownership_changed"))
-		los.connect("customization_changed", Callable(self, "_on_customization_changed"))
-	var socket := get_node_or_null("/root/SocketIOClient")
-	if socket:
-		socket.on_event("decay_snapshot", Callable(self, "_on_remote_snapshot"))
-		socket.on_event("ghost_sighting", Callable(self, "_on_remote_ghost_sighting"))
+	_connect_los_signals()
+	print("[BuildingDecaySystem] Ready.")
 
 func _process(delta: float) -> void:
-	_scan_accum += delta
-	if _scan_accum < scan_interval_sec:
+	_check_timer += delta
+	if _check_timer >= LOCAL_CHECK_INTERVAL:
+		_check_timer = 0.0
+		_run_decay_check()
+
+# ── Signal wiring ──────────────────────────────────────────────────────────────
+
+func _connect_los_signals() -> void:
+	var los: Node = get_node_or_null("/root/LandOwnershipService")
+	if los == null:
+		push_warning("[BuildingDecaySystem] LandOwnershipService not found.")
 		return
-	_scan_accum = 0.0
-	scan_all_blocks()
 
-# ── Public API — scanning ───────────────────────────────────────────────────
+	los.blocks_updated.connect(_on_blocks_updated)
+	los.decoration_streak_updated.connect(_on_decoration_streak_updated)
+	los.owned_blocks_changed.connect(_on_owned_blocks_changed)
 
-## Full sweep of every owned block.  Advances decay stages where due and
-## emits visual updates / ghost sightings.  Safe to call at any time.
-func scan_all_blocks() -> void:
-	var los := _los()
-	if los == null: return
-	var now: int = int(Time.get_unix_time_from_system())
-	var processed: int = 0
-	for key in los.blocks.keys():
-		var block: Dictionary = los.blocks[key]
-		if block.owner_id == "":
-			# Unowned: wipe decay record so reclaimed blocks start fresh.
-			if decay_state.has(key):
-				decay_state.erase(key)
-			continue
-		var rec: Dictionary = _ensure_record(key, block)
-		var stage := _compute_stage(block.last_visit, now)
-		if stage != rec.stage:
-			_transition(key, rec, stage, now)
-		processed += 1
-	if not _did_initial_scan:
-		_did_initial_scan = true
-		emit_signal("decay_snapshot_ready", current_snapshot())
-	# Periodic snapshot refresh every scan.
-	if processed > 0:
-		emit_signal("decay_snapshot_ready", current_snapshot())
+# ── Public API ─────────────────────────────────────────────────────────────────
 
-## Query the current decay stage for a block.  0 if not tracked.
-func decay_level_for(block_key: String) -> int:
-	if decay_state.has(block_key):
-		return int(decay_state[block_key].stage)
+## Register a 3D building node so the decay system can modify its materials.
+## Call this from CityGenerator or a building placement script.
+func register_building(block_id: String, building_node: Node3D) -> void:
+	building_nodes[block_id] = building_node
+	applied_stages[block_id] = -1   # Force initial apply
+	_apply_decay_stage_to_node(block_id)
+
+## Unregister a building node (called when the block is freed).
+func unregister_building(block_id: String) -> void:
+	building_nodes.erase(block_id)
+	applied_stages.erase(block_id)
+	shame_broadcast_times.erase(block_id)
+
+## Immediately restore a block's decay to stage 0.
+## Called when the local player visits or decorates their block.
+func restore_block(block_id: String) -> void:
+	_set_stage(block_id, 0, true)
+	_notify_server_visit(block_id)
+	emit_signal("building_restored", block_id)
+
+## Force re-evaluate decay for a specific block.
+func refresh_block(block_id: String) -> void:
+	_apply_decay_stage_to_node(block_id)
+
+## Returns the current decay stage (0-4) for a block, or 0 if not tracked.
+func get_decay_stage(block_id: String) -> int:
+	return int(applied_stages.get(block_id, 0))
+
+## Returns a human-readable description of a decay stage.
+func get_stage_description(stage: int) -> String:
+	match stage:
+		0: return "Pristine — glowing neon"
+		1: return "Flickering — owner absent 2+ days"
+		2: return "Dimming — structural wear visible (4+ days)"
+		3: return "Ghost Building — owner missing 7 days"
+		4: return "Ruins — abandoned 14+ days"
+		_: return "Unknown"
+
+## Returns the Color tint for a given stage.
+func get_stage_color(stage: int) -> Color:
+	if stage < 0 or stage >= STAGE_COLOR_TINT.size():
+		return Color.WHITE
+	return STAGE_COLOR_TINT[stage]
+
+# ── Internal decay logic ───────────────────────────────────────────────────────
+
+func _run_decay_check() -> void:
+	var los: Node = get_node_or_null("/root/LandOwnershipService")
+	if los == null:
+		return
+
+	var now_unix: int = int(Time.get_unix_time_from_system())
+	# Check all blocks we know about (not just owned ones) for visual variety.
+	for block_id in los.blocks:
+		var block: Dictionary = los.blocks[block_id]
+		var stage: int = _compute_stage(block, now_unix)
+		var old_stage: int = int(applied_stages.get(block_id, 0))
+		if stage != old_stage:
+			_set_stage(block_id, stage, false)
+
+func _on_blocks_updated(changed_ids: Array) -> void:
+	var now_unix: int = int(Time.get_unix_time_from_system())
+	var los: Node = get_node_or_null("/root/LandOwnershipService")
+	if los == null:
+		return
+	for bid in changed_ids:
+		if los.blocks.has(bid):
+			var stage: int = _compute_stage(los.blocks[bid], now_unix)
+			_set_stage(bid, stage, false)
+
+func _on_decoration_streak_updated(block_id: String,
+		new_streak: int, gold_glow_unlocked: bool) -> void:
+	if gold_glow_unlocked:
+		_apply_gold_glow(block_id)
+
+func _on_owned_blocks_changed(_block_ids: Array) -> void:
+	# Re-evaluate all known blocks when ownership changes.
+	_run_decay_check()
+
+func _compute_stage(block: Dictionary, now_unix: int) -> int:
+	# Server-authoritative stage takes priority if present.
+	var server_stage: int = int(block.get("decay_stage", -1))
+	if server_stage >= 0:
+		return clamp(server_stage, 0, 4)
+
+	var last_visit: int = int(block.get("last_visit_unix", 0))
+	if last_visit == 0:
+		return 0   # No data — assume pristine.
+
+	var days_since: float = float(now_unix - last_visit) / 86400.0
+
+	if days_since >= float(STAGE_THRESHOLDS_DAYS[4]):
+		return 4
+	elif days_since >= float(STAGE_THRESHOLDS_DAYS[3]):
+		return 3
+	elif days_since >= float(STAGE_THRESHOLDS_DAYS[2]):
+		return 2
+	elif days_since >= float(STAGE_THRESHOLDS_DAYS[1]):
+		return 1
 	return 0
 
-## Returns a copy of the full decay record for UI / debug.
-func decay_record(block_key: String) -> Dictionary:
-	return decay_state.get(block_key, {}).duplicate(true)
-
-## Returns all currently ghosted blocks (stage >= 4) sorted by longest absent.
-func ghost_blocks() -> Array:
-	var out: Array = []
-	for key in decay_state.keys():
-		var r: Dictionary = decay_state[key]
-		if int(r.stage) >= 4:
-			out.append(r.duplicate(true))
-	out.sort_custom(func(a, b): return int(a.ghost_since) < int(b.ghost_since))
-	return out
-
-## Blocks the local player owns that are currently decaying (stage >= 1).
-func my_decaying_blocks(owner_id: String) -> Array:
-	var out: Array = []
-	for key in decay_state.keys():
-		var r: Dictionary = decay_state[key]
-		if str(r.owner_id) == owner_id and int(r.stage) >= 1:
-			out.append(r.duplicate(true))
-	out.sort_custom(func(a, b): return int(a.stage) > int(b.stage))
-	return out
-
-## Aggregate snapshot — used by the real-estate UI.
-func current_snapshot() -> Dictionary:
-	var counts := {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
-	for r in decay_state.values():
-		var s := int(r.stage)
-		counts[s] = int(counts.get(s, 0)) + 1
-	return {
-		"tracked": decay_state.size(),
-		"by_stage": counts,
-		"recent_ghosts": ghost_feed.duplicate(),
-	}
-
-# ── Public API — restoration ────────────────────────────────────────────────
-
-## Owner visits their block.  Call from player_controller when stepping
-## onto the block.  If currently decaying, a restoration is queued — full
-## recovery also requires customization within `restoration_same_day_sec`.
-func register_owner_presence(block_key: String, owner_id: String) -> void:
-	var los := _los()
-	if los == null: return
-	var block: Dictionary = los.get_block(block_key)
-	if block.is_empty() or block.owner_id != owner_id:
+func _set_stage(block_id: String, new_stage: int, force: bool) -> void:
+	var old_stage: int = int(applied_stages.get(block_id, 0))
+	if not force and old_stage == new_stage:
 		return
-	var now: int = int(Time.get_unix_time_from_system())
-	# Update last_visit in the canonical registry.
-	_touch_last_visit(block_key, now)
-	var rec: Dictionary = decay_state.get(block_key, {})
-	if rec.is_empty() or int(rec.stage) == 0:
+
+	applied_stages[block_id] = new_stage
+	_apply_decay_stage_to_node(block_id)
+
+	if new_stage != old_stage:
+		emit_signal("decay_stage_changed", block_id, old_stage, new_stage)
+
+	if new_stage >= 3:
+		_maybe_broadcast_shame(block_id, new_stage)
+
+func _apply_decay_stage_to_node(block_id: String) -> void:
+	if not building_nodes.has(block_id):
 		return
-	emit_signal("restoration_started", block_key, owner_id)
-	emit_signal("shame_toast",
-		"Welcome back! Customize the building to fully restore it.")
-	rec.restore_progress = 0.5
-	decay_state[block_key] = rec
+	var node: Node3D = building_nodes[block_id]
+	if not is_instance_valid(node):
+		building_nodes.erase(block_id)
+		return
 
-## Call from LandOwnershipService on customization success — this completes
-## a restoration even if the player never walked over the block (you designed
-## it in the companion app).
-func register_customization(block_key: String, owner_id: String) -> void:
-	var rec: Dictionary = decay_state.get(block_key, {})
-	if rec.is_empty(): return
-	if str(rec.owner_id) != owner_id: return
-	if int(rec.stage) == 0: return
-	var recovered: int = int(rec.stage)
-	_restore_fully(block_key, owner_id, recovered)
+	var stage: int = int(applied_stages.get(block_id, 0))
+	var alpha: float   = float(STAGE_ALPHA[clamp(stage, 0, 4)])
+	var emission: float = float(STAGE_EMISSION[clamp(stage, 0, 4)])
+	var tint: Color    = STAGE_COLOR_TINT[clamp(stage, 0, 4)]
 
-func _restore_fully(block_key: String, owner_id: String, stages_recovered: int) -> void:
-	var rec: Dictionary = decay_state[block_key]
-	var old: int = int(rec.stage)
-	rec.stage = 0
-	rec.stage_since = int(Time.get_unix_time_from_system())
-	rec.ghost_since = 0
-	rec.restore_progress = 1.0
-	rec.notified = {}
-	decay_state[block_key] = rec
-	emit_signal("decay_stage_changed", block_key, 0, old)
-	emit_signal("decay_visual_update", block_key, 0, STAGE_TINTS[0], STAGE_OVERLAY_HINTS[0])
-	emit_signal("restoration_completed", block_key, owner_id, stages_recovered)
-	emit_signal("shame_toast",
-		"Your building is restored to pristine condition! (+%d QNT tenant confidence)" %
-			(stages_recovered * 25))
-	_sync_los_decay_level(block_key, 0)
+	_apply_material_overrides(node, alpha, emission, tint)
 
-# ── Public API — reclaim (social punishment) ────────────────────────────────
+func _apply_material_overrides(node: Node3D, alpha: float,
+		emission_energy: float, tint: Color) -> void:
+	# Walk MeshInstance3D children to update materials.
+	for child in node.get_children():
+		if child is MeshInstance3D:
+			var mi: MeshInstance3D = child as MeshInstance3D
+			for surf_idx in range(mi.get_surface_override_material_count()):
+				var mat = mi.get_surface_override_material(surf_idx)
+				if mat == null:
+					mat = mi.mesh.surface_get_material(surf_idx)
+				if mat == null:
+					continue
+				# Clone to avoid mutating shared resources.
+				mat = mat.duplicate() as Material
+				mi.set_surface_override_material(surf_idx, mat)
 
-## Another player attempts to seize a ghost block.  Fails if the block is
-## not at stage 4 or hasn't been ghosted long enough.  Returns true on
-## successful reclaim.
-func attempt_ghost_reclaim(block_key: String, claimant_id: String,
-		claimant_name: String, claimant_clan: String,
-		claimant_balance: int) -> bool:
-	var rec: Dictionary = decay_state.get(block_key, {})
-	if rec.is_empty() or int(rec.stage) < 4:
-		emit_signal("shame_toast", "That building isn't a ghost yet.")
-		return false
-	var now: int = int(Time.get_unix_time_from_system())
-	if now - int(rec.ghost_since) < ghost_claim_unlock_days * 86400:
-		var remaining: int = (ghost_claim_unlock_days * 86400 - (now - int(rec.ghost_since))) / 3600
-		emit_signal("shame_toast",
-			"The owner still has %d hours to come back before you can reclaim." % remaining)
-		return false
-	var los := _los()
-	if los == null: return false
-	var block: Dictionary = los.get_block(block_key)
-	if block.is_empty(): return false
-	var fee: int = int(round(int(block.price) * ghost_steal_price_mult))
-	if claimant_balance < fee:
-		emit_signal("shame_toast",
-			"Reclaim fee %d QNT exceeds your balance." % fee)
-		return false
-	var old_owner: String = str(rec.owner_id)
-	var parts := block_key.split(":")
-	if parts.size() != 3: return false
-	los.transfer_block(block_key, claimant_id, claimant_name, claimant_clan)
-	# Start fresh.
-	decay_state.erase(block_key)
-	_sync_los_decay_level(block_key, 0)
-	emit_signal("ghost_reclaimed", block_key, old_owner, claimant_id, fee)
-	emit_signal("shame_toast",
-		"%s reclaimed a ghost block from %s for %d QNT!" % [
-			claimant_name, old_owner, fee])
-	var socket := get_node_or_null("/root/SocketIOClient")
-	if socket and socket.has_method("send_event"):
-		socket.send_event("ghost_reclaim", {
-			"block_key": block_key,
-			"claimant_id": claimant_id,
-			"fee": fee,
-		})
-	return true
+				if mat is StandardMaterial3D:
+					var std_mat: StandardMaterial3D = mat as StandardMaterial3D
+					std_mat.albedo_color = Color(
+							tint.r, tint.g, tint.b, alpha)
+					if alpha < 1.0:
+						std_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+					std_mat.emission_energy_multiplier = emission_energy
 
-# ── Internal — stage math ───────────────────────────────────────────────────
+				elif mat is ShaderMaterial:
+					# Cyber-building shader — set known uniform names.
+					var sm: ShaderMaterial = mat as ShaderMaterial
+					if sm.shader and sm.shader.has_parameter("albedo_alpha"):
+						sm.set_shader_parameter("albedo_alpha", alpha)
+					if sm.shader and sm.shader.has_parameter("emission_multiplier"):
+						sm.set_shader_parameter("emission_multiplier",
+								emission_energy)
+					if sm.shader and sm.shader.has_parameter("tint_color"):
+						sm.set_shader_parameter("tint_color", tint)
+		# Recurse into children (e.g. LOD sub-nodes).
+		if child.get_child_count() > 0:
+			_apply_material_overrides(child as Node3D, alpha,
+					emission_energy, tint)
 
-func _compute_stage(last_visit: int, now: int) -> int:
-	if last_visit <= 0:
-		return 0  # never-visited fresh claims get a grace period
-	var days_since: float = float(now - last_visit) / 86400.0
-	if days_since < float(decay_grace_days):
-		return 0
-	var steps: int = int(floor((days_since - decay_grace_days) / float(decay_step_days))) + 1
-	return clamp(steps, 0, 4)
+func _apply_gold_glow(block_id: String) -> void:
+	if not building_nodes.has(block_id):
+		return
+	var node: Node3D = building_nodes[block_id]
+	if not is_instance_valid(node):
+		return
 
-func _ensure_record(block_key: String, block: Dictionary) -> Dictionary:
-	if decay_state.has(block_key):
-		# Keep record in sync if ownership changed or last_visit moved.
-		var r: Dictionary = decay_state[block_key]
-		r.owner_id = str(block.owner_id)
-		r.last_visit = int(block.last_visit)
-		decay_state[block_key] = r
-		return r
-	var rec := {
-		"block_key": block_key,
-		"owner_id": str(block.owner_id),
-		"stage": 0,
-		"last_visit": int(block.last_visit),
-		"stage_since": int(Time.get_unix_time_from_system()),
-		"ghost_since": 0,
-		"notified": {},
-		"restore_progress": 0.0,
-	}
-	decay_state[block_key] = rec
-	return rec
+	# Reset decay to 0 and apply gold tint.
+	applied_stages[block_id] = 0
+	_apply_material_overrides_gold(node)
+	emit_signal("gold_glow_applied", block_id)
+	print("[BuildingDecaySystem] Gold glow applied to block: ", block_id)
 
-func _transition(block_key: String, rec: Dictionary, new_stage: int, now: int) -> void:
-	var old: int = int(rec.stage)
-	rec.stage = new_stage
-	rec.stage_since = now
-	if new_stage >= 4 and old < 4:
-		rec.ghost_since = now
-	elif new_stage < 4:
-		rec.ghost_since = 0
-	decay_state[block_key] = rec
-	emit_signal("decay_stage_changed", block_key, new_stage, old)
-	emit_signal("decay_visual_update", block_key, new_stage,
-		STAGE_TINTS[new_stage], STAGE_OVERLAY_HINTS[new_stage])
-	_sync_los_decay_level(block_key, new_stage)
-	_penalize_leaderboard(rec, new_stage, old)
-	_broadcast_shame(block_key, rec, new_stage)
+func _apply_material_overrides_gold(node: Node3D) -> void:
+	for child in node.get_children():
+		if child is MeshInstance3D:
+			var mi: MeshInstance3D = child as MeshInstance3D
+			for surf_idx in range(mi.get_surface_override_material_count()):
+				var mat = mi.get_surface_override_material(surf_idx)
+				if mat == null:
+					mat = mi.mesh.surface_get_material(surf_idx)
+				if mat == null:
+					continue
+				mat = mat.duplicate() as Material
+				mi.set_surface_override_material(surf_idx, mat)
 
-func _penalize_leaderboard(rec: Dictionary, new_stage: int, old: int) -> void:
-	if new_stage <= old: return
-	var los := _los()
-	if los == null: return
-	# Award negative points via the same accrual API.
-	if los.has_method("_award_leaderboard_points"):
-		var diff := new_stage - old
-		los._award_leaderboard_points(rec.owner_id, _owner_name_for(rec.owner_id),
-			-leaderboard_penalty_per_stage * diff, "decay")
+				if mat is StandardMaterial3D:
+					var std_mat: StandardMaterial3D = mat as StandardMaterial3D
+					std_mat.albedo_color = Color(1.0, 1.0, 1.0, 1.0)
+					std_mat.emission_enabled = true
+					std_mat.emission = GOLD_GLOW_COLOR
+					std_mat.emission_energy_multiplier = GOLD_GLOW_ENERGY
 
-func _broadcast_shame(block_key: String, rec: Dictionary, stage: int) -> void:
-	if rec.notified.has(stage): return
-	rec.notified[stage] = true
-	decay_state[block_key] = rec
-	if stage == 1:
-		return  # stage 1 is silent (just colour drift)
-	var los := _los()
-	var days_absent := 0
+				elif mat is ShaderMaterial:
+					var sm: ShaderMaterial = mat as ShaderMaterial
+					if sm.shader and sm.shader.has_parameter("emission_multiplier"):
+						sm.set_shader_parameter("emission_multiplier",
+								GOLD_GLOW_ENERGY)
+					if sm.shader and sm.shader.has_parameter("tint_color"):
+						sm.set_shader_parameter("tint_color", GOLD_GLOW_COLOR)
+		if child.get_child_count() > 0:
+			_apply_material_overrides_gold(child as Node3D)
+
+func _maybe_broadcast_shame(block_id: String, stage: int) -> void:
+	var los: Node = get_node_or_null("/root/LandOwnershipService")
+	if los == null:
+		return
+
+	var now: float = Time.get_ticks_msec() / 1000.0
+	var last_time: float = float(shame_broadcast_times.get(block_id, -9999.0))
+	if now - last_time < SHAME_NOTIFICATION_COOLDOWN:
+		return
+
+	shame_broadcast_times[block_id] = now
+
+	var block: Dictionary = los.get_block(block_id)
+	var owner_name: String = block.get("owner_name", "Unknown")
+
+	emit_signal("shame_notification_sent", block_id, stage, owner_name)
+
+	# Broadcast in-world notification so nearby players see it.
+	var banners: Array = get_tree().get_nodes_in_group("announcement_banner")
+	for banner in banners:
+		if banner.has_method("show_announcement"):
+			var msg: String
+			if stage == 3:
+				msg = "👻  %s's building is fading — they haven't visited in 7 days!" \
+						% owner_name
+			else:
+				msg = "💀  %s's block is in ruins — 14 days abandoned!" \
+						% owner_name
+			banner.show_announcement(msg, 5.0)
+			break
+
+func _notify_server_visit(block_id: String) -> void:
+	var socket: Node = get_node_or_null("/root/SocketIOClient")
+	if socket == null:
+		return
+	var los: Node = get_node_or_null("/root/LandOwnershipService")
+	var player_id: String = ""
 	if los:
-		var block: Dictionary = los.get_block(block_key)
-		if block:
-			days_absent = int((int(Time.get_unix_time_from_system()) -
-				int(block.last_visit)) / 86400)
-	var owner_name := _owner_name_for(rec.owner_id)
-	var msg := ""
-	match stage:
-		2:
-			msg = "%s is starting to look grimy (%d days absent)." % [
-				_pretty(block_key), days_absent]
-		3:
-			msg = "Vines are overgrowing %s — %s hasn't returned for %d days!" % [
-				_pretty(block_key), owner_name, days_absent]
-		4:
-			msg = "👻 GHOST BUILDING: %s has been abandoned for %d days by %s." % [
-				_pretty(block_key), days_absent, owner_name]
-	if msg == "": return
-	emit_signal("ghost_sighting_broadcast", block_key, rec.owner_id, owner_name, days_absent)
-	emit_signal("shame_toast", msg)
-	_push_ghost_feed({
-		"block_key": block_key,
-		"owner_id": rec.owner_id,
-		"owner_name": owner_name,
-		"stage": stage,
-		"days_absent": days_absent,
-		"ts": int(Time.get_unix_time_from_system()),
-		"msg": msg,
+		player_id = los.local_player_id
+
+	socket.emit_event("land_block_visit", {
+		"blockId":  block_id,
+		"playerId": player_id,
 	})
-	var socket := get_node_or_null("/root/SocketIOClient")
-	if socket and socket.has_method("send_event"):
-		socket.send_event("ghost_sighting", {
-			"block_key": block_key,
-			"stage": stage,
-			"days_absent": days_absent,
-			"owner_id": rec.owner_id,
-		})
-
-func _push_ghost_feed(entry: Dictionary) -> void:
-	ghost_feed.push_front(entry)
-	while ghost_feed.size() > GHOST_FEED_MAX:
-		ghost_feed.pop_back()
-
-# ── Signal plumbing to other services ───────────────────────────────────────
-
-func _on_registry_updated() -> void:
-	# A no-op fast-path.  Full decay advancement is still driven by the
-	# periodic scan to avoid burst cost on big snapshot ingests.
-	if not _did_initial_scan:
-		scan_all_blocks()
-
-func _on_ownership_changed(block_key: String, _old, _new) -> void:
-	# A new owner means a clean slate.
-	if decay_state.has(block_key):
-		decay_state.erase(block_key)
-	scan_all_blocks()
-
-func _on_customization_changed(block_key: String, _data) -> void:
-	var los := _los()
-	if los == null: return
-	var block: Dictionary = los.get_block(block_key)
-	if block.is_empty() or block.owner_id == "": return
-	register_customization(block_key, block.owner_id)
-
-func _on_remote_snapshot(payload) -> void:
-	if not (payload is Dictionary): return
-	if payload.has("records"):
-		for r in payload.records:
-			if r is Dictionary and r.has("block_key"):
-				decay_state[str(r.block_key)] = r
-
-func _on_remote_ghost_sighting(payload) -> void:
-	if not (payload is Dictionary): return
-	var block_key: String = str(payload.get("block_key", ""))
-	if block_key == "": return
-	var entry := {
-		"block_key": block_key,
-		"owner_id": str(payload.get("owner_id", "")),
-		"owner_name": _owner_name_for(str(payload.get("owner_id", ""))),
-		"stage": int(payload.get("stage", 4)),
-		"days_absent": int(payload.get("days_absent", 0)),
-		"ts": int(Time.get_unix_time_from_system()),
-		"msg": "%s has been spotted as a ghost building!" % _pretty(block_key),
-	}
-	_push_ghost_feed(entry)
-	emit_signal("ghost_sighting_broadcast",
-		block_key, entry.owner_id, entry.owner_name, entry.days_absent)
-	emit_signal("shame_toast", entry.msg)
-
-# ── Helpers ─────────────────────────────────────────────────────────────────
-
-func _los() -> Node:
-	if _los_ref == null or not is_instance_valid(_los_ref):
-		_los_ref = get_node_or_null("/root/LandOwnershipService")
-	return _los_ref
-
-func _touch_last_visit(block_key: String, now: int) -> void:
-	var los := _los()
-	if los == null: return
-	if not los.blocks.has(block_key): return
-	var rec: Dictionary = los.blocks[block_key]
-	rec.last_visit = now
-	los.blocks[block_key] = rec
-	if decay_state.has(block_key):
-		decay_state[block_key].last_visit = now
-
-func _sync_los_decay_level(block_key: String, level: int) -> void:
-	var los := _los()
-	if los == null: return
-	if not los.blocks.has(block_key): return
-	los.blocks[block_key].decay_level = level
-
-func _owner_name_for(owner_id: String) -> String:
-	if owner_id == "": return "unknown"
-	var los := _los()
-	if los == null: return owner_id
-	var owned: Array = los.blocks_owned_by(owner_id)
-	if owned.is_empty(): return owner_id
-	return str(los.get_block(owned[0]).get("owner_name", owner_id))
-
-func _pretty(block_key: String) -> String:
-	var los := _los()
-	if los and los.has_method("describe_block"):
-		var parts := block_key.split(":")
-		if parts.size() == 3:
-			return "Block (%s,%s) in %s" % [parts[1], parts[2],
-				parts[0].capitalize()]
-	return block_key
-
-## Returns a localized stage label for HUD overlays.
-func stage_label(stage: int) -> String:
-	if stage < 0 or stage >= STAGE_LABELS.size():
-		return "unknown"
-	return STAGE_LABELS[stage]
-
-## Pretty printer for ghost feed entries (used by news ticker).
-func format_ghost_feed_entry(entry: Dictionary) -> String:
-	return "[%s] %s" % [stage_label(int(entry.get("stage", 0))).to_upper(),
-		str(entry.get("msg", ""))]
