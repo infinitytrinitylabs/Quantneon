@@ -45,6 +45,10 @@ EventHUD="*res://ui/event_hud.tscn"
 LandOwnershipUI="*res://ui/land_ownership_ui.tscn"
 RentEconomyUI="*res://ui/rent_economy_ui.tscn"
 CityLeaderboardUI="*res://ui/city_leaderboard_ui.tscn"
+FactionManager="*res://scripts/services/FactionManager.gd"
+TerritoryWar="*res://scripts/services/TerritoryWar.gd"
+SeasonSystem="*res://scripts/services/SeasonSystem.gd"
+MiniGameSystem="*res://scripts/games/MiniGameSystem.gd"
 
 [display]
 
