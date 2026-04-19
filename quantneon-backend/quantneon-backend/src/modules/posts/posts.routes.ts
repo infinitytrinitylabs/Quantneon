@@ -67,21 +67,69 @@ export async function postsRoutes(fastify: FastifyInstance): Promise<void> {
     });
     if (!post) return reply.code(404).send({ error: 'Post not found' });
 
+    // Increment view count asynchronously, log errors
     prisma.neonPost
       .update({ where: { id: post.id }, data: { viewCount: { increment: 1 } } })
-      .catch(() => {});
+      .catch((err) => logger.warn({ err, postId: post.id }, 'Failed to increment view count'));
 
     return reply.send({ post });
   });
 
-  /** POST /v1/posts/:id/like — Like a post */
+  /** POST /v1/posts/:id/like — Like a post (with deduplication) */
   fastify.post('/:id/like', { preHandler: [fastify.authenticate] }, async (request, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
-    const post = await prisma.neonPost.update({
-      where: { id },
-      data: { likeCount: { increment: 1 } },
+
+    // Check if post exists
+    const post = await prisma.neonPost.findUnique({ where: { id } });
+    if (!post) return reply.code(404).send({ error: 'Post not found' });
+
+    try {
+      // Create like record (unique constraint prevents duplicates)
+      await prisma.postLike.create({
+        data: {
+          postId: id,
+          userId: request.user!.id,
+        },
+      });
+
+      // Increment like count
+      const updated = await prisma.neonPost.update({
+        where: { id },
+        data: { likeCount: { increment: 1 } },
+      });
+
+      return reply.send({ liked: true, likeCount: updated.likeCount });
+    } catch (err: any) {
+      // Check if it's a duplicate like (unique constraint violation)
+      if (err.code === 'P2002') {
+        return reply.code(400).send({ error: 'Post already liked' });
+      }
+      throw err; // Re-throw other errors
+    }
+  });
+
+  /** DELETE /v1/posts/:id/like — Unlike a post */
+  fastify.delete('/:id/like', { preHandler: [fastify.authenticate] }, async (request, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+
+    const like = await prisma.postLike.findUnique({
+      where: {
+        postId_userId: {
+          postId: id,
+          userId: request.user!.id,
+        },
+      },
     });
-    return reply.send({ likeCount: post.likeCount });
+
+    if (!like) return reply.code(404).send({ error: 'Like not found' });
+
+    await prisma.postLike.delete({ where: { id: like.id } });
+    const updated = await prisma.neonPost.update({
+      where: { id },
+      data: { likeCount: { decrement: 1 } },
+    });
+
+    return reply.send({ liked: false, likeCount: updated.likeCount });
   });
 
   /** DELETE /v1/posts/:id — Delete own post */

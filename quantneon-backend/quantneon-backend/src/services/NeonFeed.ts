@@ -147,10 +147,23 @@ export const NeonFeedService = {
    */
   async invalidateCache(userId: string): Promise<void> {
     try {
-      const keys = await redis.keys(`neon:feed:${userId}:*`);
-      if (keys.length > 0) await redis.del(...keys);
-    } catch {
-      // Non-fatal
+      // Use SCAN instead of KEYS to avoid blocking Redis
+      const pattern = `neon:feed:${userId}:*`;
+      const keysToDelete: string[] = [];
+      let cursor = '0';
+
+      do {
+        const [newCursor, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        cursor = newCursor;
+        keysToDelete.push(...keys);
+      } while (cursor !== '0');
+
+      if (keysToDelete.length > 0) {
+        await redis.del(...keysToDelete);
+        logger.debug({ userId, count: keysToDelete.length }, '[NeonFeed] Cache invalidated');
+      }
+    } catch (err) {
+      logger.warn({ err, userId }, '[NeonFeed] Cache invalidation failed');
     }
   },
 };

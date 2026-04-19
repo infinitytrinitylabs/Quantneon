@@ -48,15 +48,17 @@ services:
       sh -c "npx prisma migrate deploy &&
              npm start"
 
-  frontend:
-    build:
-      context: ./quantneon-web
-      dockerfile: Dockerfile
-    container_name: quantneon-frontend
-    ports:
-      - "80:80"
-    depends_on:
-      - backend
+  # NOTE: Frontend service commented out - needs Dockerfile in quantneon-frontend
+  # Uncomment and update when frontend Dockerfile is ready
+  # frontend:
+  #   build:
+  #     context: ../../quantneon-frontend
+  #     dockerfile: Dockerfile
+  #   container_name: quantneon-frontend
+  #   ports:
+  #     - "80:80"
+  #   depends_on:
+  #     - backend
 
 volumes:
   pgdata:

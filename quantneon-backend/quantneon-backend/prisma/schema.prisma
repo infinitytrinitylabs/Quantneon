@@ -29,8 +29,10 @@ model User {
   posts        NeonPost[]
   streams      LiveStream[]
   virtualItems UserVirtualItem[]
+  postLikes    PostLike[]
 
   @@map("users")
+  @@index([isBanned])
 }
 
 // ─── UserAvatars ──────────────────────────────────────────────────────────────
@@ -70,8 +72,27 @@ model NeonPost {
   arAnchorUrl String?       // AR anchor data URL
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
+  likes       PostLike[]
 
   @@map("neon_posts")
+  @@index([authorId])
+  @@index([createdAt])
+}
+
+// ─── PostLikes ────────────────────────────────────────────────────────────────
+
+model PostLike {
+  id        String   @id @default(uuid())
+  postId    String
+  post      NeonPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([postId, userId])
+  @@map("post_likes")
+  @@index([userId])
+  @@index([postId])
 }
 
 enum MediaType {
@@ -104,6 +125,8 @@ model LiveStream {
   updatedAt    DateTime     @updatedAt
 
   @@map("live_streams")
+  @@index([status])
+  @@index([hostId])
 }
 
 enum StreamStatus {
