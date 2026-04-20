@@ -6,6 +6,9 @@
 class_name VirtualLobby
 extends ARVRBase
 
+const QualityScoringScript = preload("res://scripts/social/QualityScoring.gd")
+const InstanceRouterScript = preload("res://scripts/networking/InstanceRouter.gd")
+
 # ─── Signals ──────────────────────────────────────────────────────────────────
 signal user_joined(user_id: String, display_name: String)
 signal user_left(user_id: String)
@@ -28,14 +31,24 @@ signal capacity_reached()
 var active_stream_id: String = ""
 var present_users: Dictionary = {} # { user_id: { display_name, avatar_node } }
 var _avatar_scene: PackedScene = null
+var quality_scoring: QualityScoring
+var instance_router: InstanceRouter
+var _instance_aura_cache: Dictionary = {}
 
 # ─── Lifecycle ────────────────────────────────────────────────────────────────
 
 func _ready() -> void:
 	super._ready()
+	_setup_social_clustering()
 	_apply_ambient()
 	_register_with_network()
 	print("[VirtualLobby] '%s' ready (capacity: %d)" % [display_name, max_capacity])
+
+func _setup_social_clustering() -> void:
+	quality_scoring = QualityScoringScript.new()
+	instance_router = InstanceRouterScript.new()
+	instance_router.set_quality_scoring(quality_scoring)
+	instance_router.instance_cue_updated.connect(_on_instance_cue_updated)
 
 func _apply_ambient() -> void:
 	var env_node = get_node_or_null("WorldEnvironment")
@@ -64,6 +77,8 @@ func join_lobby(user_id: String, dname: String) -> bool:
 		return false
 	
 	present_users[user_id] = { "display_name": dname, "avatar_node": null }
+	var instance_id: String = instance_router.route_user(user_id)
+	present_users[user_id]["instance_id"] = instance_id
 	emit_signal("user_joined", user_id, dname)
 	
 	# Notify server
@@ -79,6 +94,7 @@ func leave_lobby(user_id: String) -> void:
 		if entry.avatar_node and is_instance_valid(entry.avatar_node):
 			entry.avatar_node.queue_free()
 		present_users.erase(user_id)
+		instance_router.remove_user(user_id)
 		emit_signal("user_left", user_id)
 	
 	if has_node("/root/SocketIOClient"):
@@ -116,6 +132,7 @@ func _on_remote_user_joined(data: Dictionary) -> void:
 	var dname = data.get("username", uid)
 	if uid != "" and not present_users.has(uid):
 		present_users[uid] = { "display_name": dname, "avatar_node": null }
+		present_users[uid]["instance_id"] = instance_router.route_user(uid)
 		emit_signal("user_joined", uid, dname)
 
 func _on_remote_user_left(data: Dictionary) -> void:
@@ -125,6 +142,7 @@ func _on_remote_user_left(data: Dictionary) -> void:
 		if entry.avatar_node and is_instance_valid(entry.avatar_node):
 			entry.avatar_node.queue_free()
 		present_users.erase(uid)
+		instance_router.remove_user(uid)
 		emit_signal("user_left", uid)
 
 func _on_remote_avatar_moved(data: Dictionary) -> void:
@@ -160,3 +178,54 @@ func _on_stream_viewer_joined(data: Dictionary) -> void:
 
 func on_user_interact(user_id: String) -> void:
 	print("[VirtualLobby] User '%s' is interacting with lobby '%s'" % [user_id, lobby_id])
+
+func record_social_interaction(
+	user_id: String,
+	peer_id: String,
+	interaction_quality: float,
+	shared_event_participation: float = 0.0,
+	communication_seconds: float = 0.0
+) -> void:
+	if quality_scoring == null or instance_router == null:
+		return
+	quality_scoring.record_interaction(
+		user_id,
+		peer_id,
+		interaction_quality,
+		shared_event_participation,
+		communication_seconds
+	)
+	if present_users.has(user_id):
+		present_users[user_id]["instance_id"] = instance_router.route_user(user_id)
+	if present_users.has(peer_id):
+		present_users[peer_id]["instance_id"] = instance_router.route_user(peer_id)
+
+func _on_instance_cue_updated(instance_id: String, cue_payload: Dictionary) -> void:
+	_instance_aura_cache[instance_id] = cue_payload
+	_apply_resonance_ambience()
+
+func _apply_resonance_ambience() -> void:
+	if _instance_aura_cache.is_empty():
+		return
+	var strongest_cue: Dictionary = {}
+	var best_intensity: float = -1.0
+	for cue in _instance_aura_cache.values():
+		var intensity: float = float(cue.get("aura_intensity", 0.0))
+		if intensity > best_intensity:
+			best_intensity = intensity
+			strongest_cue = cue
+	if strongest_cue.is_empty():
+		return
+
+	var env_node = get_node_or_null("WorldEnvironment")
+	if env_node == null or not (env_node is WorldEnvironment):
+		return
+	var world_env = env_node.environment as Environment
+	if world_env == null:
+		return
+
+	var cue_color: Color = strongest_cue.get("aura_color", ambient_color)
+	var cue_intensity: float = clampf(float(strongest_cue.get("aura_intensity", 0.0)), 0.0, 1.0)
+	world_env.background_color = ambient_color.lerp(cue_color, cue_intensity * 0.25)
+	world_env.ambient_light_color = ambient_color.lerp(cue_color, cue_intensity * 0.35)
+	world_env.ambient_light_energy = lerpf(0.5, 0.9, cue_intensity)
