@@ -700,6 +700,7 @@ func _apply_brush_at(world_position: Vector3) -> void:
 					"emission": brush_emission,
 				})
 		BrushKind.ERASE_VOXEL:
+			var captured: Array = _generator.call("capture_voxels_in_radius", album_id, world_position, brush_radius)
 			count = int(_generator.call("remove_voxel_at", album_id, world_position, brush_radius))
 			action_name = "erase"
 			if count > 0:
@@ -708,8 +709,10 @@ func _apply_brush_at(world_position: Vector3) -> void:
 					"position": world_position,
 					"radius":   brush_radius,
 					"count":    count,
+					"voxels":   captured,
 				})
 		BrushKind.RECOLOR:
+			var before: Array = _generator.call("capture_voxels_in_radius", album_id, world_position, brush_radius)
 			count = int(_generator.call("recolor_voxels_at", album_id, world_position, brush_radius, brush_color))
 			action_name = "recolor"
 			if count > 0:
@@ -719,10 +722,24 @@ func _apply_brush_at(world_position: Vector3) -> void:
 					"radius":   brush_radius,
 					"color":    brush_color,
 					"count":    count,
+					"voxels":   before,
 				})
 		BrushKind.GLOW:
-			count = int(_generator.call("recolor_voxels_at", album_id, world_position, brush_radius, brush_color))
+			var glow_before: Array = _generator.call("capture_voxels_in_radius", album_id, world_position, brush_radius)
+			# Use a positive emission step so the brush truly *glows* rather than
+			# silently aliasing to the recolor brush.
+			var glow_step: float = max(brush_emission, 0.5)
+			count = int(_generator.call("boost_emission_at", album_id, world_position, brush_radius, glow_step))
 			action_name = "glow"
+			if count > 0:
+				_push_undo({
+					"kind":     HistoryActionKind.GLOW,
+					"position": world_position,
+					"radius":   brush_radius,
+					"delta":    glow_step,
+					"count":    count,
+					"voxels":   glow_before,
+				})
 		BrushKind.HOVER_LIFT:
 			if _generator.has_method("translate_room"):
 				_generator.call("translate_room", album_id, Vector3(0, brush_emission * 0.1, 0))
@@ -742,6 +759,7 @@ func _on_fill_pressed() -> void:
 	var center := _last_brush_position
 	var step: float = max(0.1, brush_radius * 0.5)
 	var added := 0
+	var added_positions: Array = []
 	for x in range(-2, 3):
 		for y in range(-2, 3):
 			for z in range(-2, 3):
@@ -749,13 +767,16 @@ func _on_fill_pressed() -> void:
 				if p.distance_to(center) <= brush_radius:
 					if _generator.call("add_single_voxel", album_id, p, brush_color, brush_emission):
 						added += 1
+						added_positions.append(p)
 	_push_undo({
-		"kind":     HistoryActionKind.BULK_ADD,
-		"position": center,
-		"radius":   brush_radius,
-		"count":    added,
-		"color":    brush_color,
-		"emission": brush_emission,
+		"kind":      HistoryActionKind.BULK_ADD,
+		"position":  center,
+		"radius":    brush_radius,
+		"step":      step,
+		"count":     added,
+		"color":     brush_color,
+		"emission":  brush_emission,
+		"positions": added_positions,
 	})
 	sculpt_action_performed.emit("fill", added)
 	_refresh_status("Fill — %d voxels added" % added)
@@ -812,12 +833,22 @@ func _apply_inverse(action: Dictionary) -> void:
 		HistoryActionKind.ADD_VOXEL:
 			_generator.call("remove_voxel_at", album_id, action.position, 0.0)
 		HistoryActionKind.BULK_ADD:
-			_generator.call("remove_voxel_at", album_id, action.position, action.radius)
+			# Remove every voxel we recorded as added, one-by-one for accuracy.
+			for p in action.get("positions", []):
+				_generator.call("remove_voxel_at", album_id, p, 0.0)
 		HistoryActionKind.REMOVE_VOXEL, HistoryActionKind.BULK_REMOVE:
-			# Lossy: re-add a default voxel at the original location.
-			_generator.call("add_single_voxel", album_id, action.position, brush_color, 0.0)
-		HistoryActionKind.RECOLOR, HistoryActionKind.GLOW:
-			_generator.call("recolor_voxels_at", album_id, action.position, action.radius, Color.WHITE)
+			# Restore the captured voxels with their *original* colour/emission.
+			_generator.call("add_voxel_batch", album_id, action.get("voxels", []))
+		HistoryActionKind.RECOLOR:
+			# Restore each captured voxel's original colour by recoloring tiny
+			# spheres centred on each one.
+			for v in action.get("voxels", []):
+				_generator.call("recolor_voxels_at", album_id, v.position, 0.001, v.color)
+		HistoryActionKind.GLOW:
+			# Reverse the emission boost on each captured voxel.
+			var d: float = -float(action.get("delta", 0.0))
+			for v in action.get("voxels", []):
+				_generator.call("boost_emission_at", album_id, v.position, 0.001, d)
 
 func _reapply(action: Dictionary) -> void:
 	if _generator == null:
@@ -826,11 +857,17 @@ func _reapply(action: Dictionary) -> void:
 		HistoryActionKind.ADD_VOXEL:
 			_generator.call("add_single_voxel", album_id, action.position, action.color, action.emission)
 		HistoryActionKind.BULK_ADD:
-			_on_fill_pressed()
+			# Replay the original positions/color/emission, not the current cursor.
+			var col: Color = action.get("color", Color.WHITE)
+			var em: float = float(action.get("emission", 0.0))
+			for p in action.get("positions", []):
+				_generator.call("add_single_voxel", album_id, p, col, em)
 		HistoryActionKind.REMOVE_VOXEL, HistoryActionKind.BULK_REMOVE:
 			_generator.call("remove_voxel_at", album_id, action.position, action.get("radius", 0.0))
-		HistoryActionKind.RECOLOR, HistoryActionKind.GLOW:
+		HistoryActionKind.RECOLOR:
 			_generator.call("recolor_voxels_at", album_id, action.position, action.radius, action.color)
+		HistoryActionKind.GLOW:
+			_generator.call("boost_emission_at", album_id, action.position, action.radius, float(action.get("delta", 0.5)))
 
 func _refresh_history_list() -> void:
 	if _history_list == null:

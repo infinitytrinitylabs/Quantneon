@@ -810,8 +810,8 @@ func _layout_dome(n: int, padding: float, ceiling: float) -> Array:
 	var faces := []
 	var radius: float = 7.0
 	for i in range(n):
-		var golden := PI * (3.0 - sqrt(5.0))
-		var theta: float = golden * float(i)
+		var golden_angle := PI * (3.0 - sqrt(5.0))
+		var theta: float = golden_angle * float(i)
 		var z: float = 1.0 - (float(i) / max(1.0, float(n - 1))) * 0.85
 		var r: float = sqrt(max(0.0, 1.0 - z * z))
 		var center := Vector3(cos(theta) * r * radius, ceiling * (1.0 - z), sin(theta) * r * radius)
@@ -1043,6 +1043,63 @@ func _resolve_material(color: Color, emission: float, palette_index: int) -> Mat
 	return mat
 
 # ── Editing helpers (used by MemoryArchitect.gd) ──────────────────────────────
+
+## Returns a list of {position, color, emission} dictionaries for every
+## sculpted MeshInstance3D voxel inside `radius` of `world_position`.
+## This is used by MemoryArchitect to capture state for lossless undo before
+## destructive operations such as erase or recolor.
+func capture_voxels_in_radius(album_id: String, world_position: Vector3, radius: float) -> Array:
+	var out: Array = []
+	if not _albums.has(album_id):
+		return out
+	var record: Dictionary = _albums[album_id]
+	var parent: Node3D = record.node
+	var test_radius: float = max(radius, voxel_size * 0.5)
+	for child in parent.get_children():
+		if child is MeshInstance3D:
+			var dist: float = parent.to_global(child.transform.origin).distance_to(world_position)
+			if dist <= test_radius:
+				out.append({
+					"position": parent.to_global(child.transform.origin),
+					"color":    child.get_meta("voxel_color", Color.WHITE),
+					"emission": float(child.get_meta("voxel_emission", 0.0)),
+				})
+	return out
+
+## Recreates a batch of voxels from an array previously produced by
+## `capture_voxels_in_radius` (or any compatible {position, color, emission}
+## dictionaries). Returns the number of voxels actually added.
+func add_voxel_batch(album_id: String, voxel_data: Array) -> int:
+	var added := 0
+	for entry in voxel_data:
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		var pos: Vector3 = entry.get("position", Vector3.ZERO)
+		var col: Color = entry.get("color", Color.WHITE)
+		var em: float = float(entry.get("emission", 0.0))
+		if add_single_voxel(album_id, pos, col, em):
+			added += 1
+	return added
+
+## Boost (or reduce) the emission strength of every sculpted voxel within
+## `radius` of `world_position`. Used by the GLOW brush to make selected
+## voxels shine without changing their underlying colour.
+func boost_emission_at(album_id: String, world_position: Vector3, radius: float, delta: float) -> int:
+	if not _albums.has(album_id):
+		return 0
+	var record: Dictionary = _albums[album_id]
+	var parent: Node3D = record.node
+	var changed := 0
+	for child in parent.get_children():
+		if child is MeshInstance3D:
+			var dist: float = parent.to_global(child.transform.origin).distance_to(world_position)
+			if dist <= radius:
+				var col: Color = child.get_meta("voxel_color", Color.WHITE)
+				var em: float = clamp(float(child.get_meta("voxel_emission", 0.0)) + delta, 0.0, 8.0)
+				child.material_override = _resolve_material(col, em, -1)
+				child.set_meta("voxel_emission", em)
+				changed += 1
+	return changed
 
 func add_single_voxel(album_id: String, world_position: Vector3, color: Color, emission: float = 0.0) -> bool:
 	if not _albums.has(album_id):
