@@ -14,6 +14,7 @@ signal neighborhood_tier_unlocked(user_id: String, tier_id: String)
 
 const MAX_LAYOUT_SLOTS: int = 48
 const MAX_DECOR_PALETTES: int = 16
+const MAX_INVESTMENT_LOG_SIZE: int = 300
 const CUSTOMIZATION_CATEGORIES: PackedStringArray = [
 	"layout",
 	"lighting",
@@ -1715,8 +1716,8 @@ func invest_in_customization(
 		"notes": notes,
 		"timestamp": int(Time.get_unix_time_from_system()),
 	})
-	if investment_log.size() > 300:
-		investment_log.resize(300)
+	if investment_log.size() > MAX_INVESTMENT_LOG_SIZE:
+		investment_log.resize(MAX_INVESTMENT_LOG_SIZE)
 	home["investment_log"] = investment_log
 
 	var category_state: Dictionary = home.get("categories", {})

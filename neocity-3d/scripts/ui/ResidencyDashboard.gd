@@ -6,6 +6,7 @@
 
 extends Control
 class_name ResidencyDashboard
+const DAILY_GOAL_DAY_KEY: String = "_day"
 
 @export var resident_id: String = ""
 @export var residency_service_path: NodePath = NodePath("/root/VirtualResidency")
@@ -249,7 +250,7 @@ func _render_goals() -> void:
 		_goal_list.add_child(_make_small_label("No active cooperative goals."))
 		return
 	for goal in goals:
-		if str(goal.get("id", "")) == "_day":
+		if str(goal.get("id", "")) == DAILY_GOAL_DAY_KEY:
 			continue
 		var label: Label = Label.new()
 		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART

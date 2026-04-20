@@ -27,6 +27,8 @@ const ACTIVITY_POINTS: Dictionary = {
 	"hosting_gathering": 75,
 	"mentoring_newcomer": 95,
 }
+const MAX_ACTIVITY_LOG_SIZE: int = 200
+const DAILY_GOAL_DAY_KEY: String = "_day"
 
 const LIMITED_ITEM_POOL: Array = [
 	{"id": "aurora_gate_skin", "name": "Aurora Gate", "cost": 220, "duration_days": 10, "rarity": "epic"},
@@ -1914,8 +1916,8 @@ func _add_points(profile: Dictionary, points: int, reason: String) -> void:
 		"points": points,
 		"timestamp": int(Time.get_unix_time_from_system()),
 	})
-	if log.size() > 200:
-		log.resize(200)
+	if log.size() > MAX_ACTIVITY_LOG_SIZE:
+		log.resize(MAX_ACTIVITY_LOG_SIZE)
 	profile["activity_log"] = log
 
 func _unlock_status_markers(user_id: String, profile: Dictionary) -> void:
@@ -1938,7 +1940,7 @@ func _unlock_status_markers(user_id: String, profile: Dictionary) -> void:
 
 func _reset_daily_goals_if_needed(force: bool) -> void:
 	var today: String = Time.get_date_string_from_system()
-	var current_day: String = str(active_cooperative_goals.get("_day", ""))
+	var current_day: String = str(active_cooperative_goals.get(DAILY_GOAL_DAY_KEY, ""))
 	if not force and current_day == today and active_cooperative_goals.size() > 0:
 		return
 
@@ -1958,7 +1960,7 @@ func _reset_daily_goals_if_needed(force: bool) -> void:
 			"created_date": today,
 			"completed_unix": 0,
 		}
-	active_cooperative_goals["_day"] = today
+	active_cooperative_goals[DAILY_GOAL_DAY_KEY] = today
 
 func _maybe_progress_goal(user_id: String, preferred_goal_id: String, amount: int) -> void:
 	if amount <= 0:
