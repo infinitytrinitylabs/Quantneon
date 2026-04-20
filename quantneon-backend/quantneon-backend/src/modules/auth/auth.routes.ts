@@ -90,17 +90,43 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
       const existing = await prisma.user.findUnique({ where: { quantmailId } });
       const isNewUser = !existing;
 
-      const user = await prisma.user.upsert({
-        where: { quantmailId },
-        create: {
-          quantmailId,
-          username: displayName.toLowerCase().replace(/\s+/g, '_'),
-          displayName,
-          avatar: { create: {} }, // Bootstrap empty avatar
-        },
-        update: { displayName },
-        include: { avatar: true },
-      });
+      let generatedUsername = displayName.toLowerCase().replace(/\s+/g, '_');
+      let user;
+
+      try {
+        user = await prisma.user.upsert({
+          where: { quantmailId },
+          create: {
+            quantmailId,
+            username: generatedUsername,
+            displayName,
+            avatar: { create: {} }, // Bootstrap empty avatar
+          },
+          update: { displayName },
+          include: { avatar: true },
+        });
+      } catch (err: any) {
+        // Handle username collision (unique constraint violation)
+        if (err.code === 'P2002' && err.meta?.target?.includes('username')) {
+          // Generate a unique username by appending random suffix
+          const randomSuffix = Math.random().toString(36).substring(2, 8);
+          generatedUsername = `${generatedUsername}_${randomSuffix}`;
+
+          user = await prisma.user.upsert({
+            where: { quantmailId },
+            create: {
+              quantmailId,
+              username: generatedUsername,
+              displayName,
+              avatar: { create: {} },
+            },
+            update: { displayName },
+            include: { avatar: true },
+          });
+        } else {
+          throw err; // Re-throw other errors
+        }
+      }
 
       logger.info({ userId: user.id, isNewUser }, 'SSO login successful');
 

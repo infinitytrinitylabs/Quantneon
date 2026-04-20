@@ -166,6 +166,14 @@ export function createSocketHub(httpServer: HttpServer): SocketIOServer {
     // ── Disconnect ───────────────────────────────────────────────────────
     socket.on('disconnect', () => {
       onlineUsers.delete(socketUser.userId);
+
+      // Notify room members if user was in a lobby
+      if (socketUser.room) {
+        socket.to(`lobby:${socketUser.room}`).emit('lobby:user_left', {
+          userId: socketUser.userId,
+        });
+      }
+
       logger.info({ userId: socketUser.userId }, '[Socket] User disconnected');
       socket.broadcast.emit('user:offline', { userId: socketUser.userId });
     });

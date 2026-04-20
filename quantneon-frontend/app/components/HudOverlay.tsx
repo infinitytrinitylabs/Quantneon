@@ -47,7 +47,12 @@ export default function HudOverlay({ onEnterRoom, inRoom }: HudOverlayProps) {
     };
 
     animationFrameId = window.requestAnimationFrame(sampleFps);
-    return () => window.cancelAnimationFrame(animationFrameId);
+
+    return () => {
+      if (animationFrameId) {
+        window.cancelAnimationFrame(animationFrameId);
+      }
+    };
   }, []);
 
   return (

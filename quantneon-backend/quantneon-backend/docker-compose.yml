@@ -26,15 +26,18 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
 
   backend:
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile
     container_name: quantneon-backend
     environment:
       - NODE_ENV=production
       - DATABASE_URL=postgresql://quantneon:password@db:5432/quantneon?schema=public
-      - REDIS_URL=redis://redis:6379
-      - JWT_SECRET=super_secret_jwt_key_quantneon_2024
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - JWT_SECRET=${JWT_SECRET:-change_this_in_production}
+      - QUANTMAIL_JWT_SECRET=${QUANTMAIL_JWT_SECRET:-change_this_in_production}
+      - CORS_ORIGIN=${CORS_ORIGIN:-*}
       - PORT=3000
     ports:
       - "3000:3000"

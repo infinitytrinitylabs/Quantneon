@@ -73,6 +73,22 @@ export async function streamsRoutes(fastify: FastifyInstance): Promise<void> {
     const parsed = UpdateStreamSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
 
+    // Validate state transitions
+    if (parsed.data.status) {
+      const validTransitions: Record<string, string[]> = {
+        SCHEDULED: ['LIVE', 'ENDED'],
+        LIVE: ['ENDED'],
+        ENDED: [], // No transitions allowed from ENDED
+      };
+
+      const allowedStates = validTransitions[stream.status];
+      if (!allowedStates.includes(parsed.data.status)) {
+        return reply.code(400).send({
+          error: `Invalid state transition from ${stream.status} to ${parsed.data.status}`,
+        });
+      }
+    }
+
     const updates: Record<string, unknown> = { ...parsed.data };
     if (parsed.data.status === 'LIVE' && !stream.startedAt) updates.startedAt = new Date();
     if (parsed.data.status === 'ENDED' && !stream.endedAt) updates.endedAt = new Date();
